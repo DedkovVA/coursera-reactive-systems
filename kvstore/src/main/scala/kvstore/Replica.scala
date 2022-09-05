@@ -39,8 +39,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
 
   var counter: Long = 0L
 
-  var snapshotsInProgress: Set[(Snapshot, ActorRef)] = Set.empty
+  var snapshotsInProgress: Map[Snapshot, ActorRef] = Map.empty
   var persistedSnapshots: Set[Snapshot] = Set.empty
+
+  var operationsInProgress: Map[Operation, (ActorRef, Int)] = Map.empty
+  var persistedOperations: Set[Operation] = Set.empty
 
   val persistence = context.system.actorOf(persistenceProps)
 
@@ -48,18 +51,57 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
     case JoinedPrimary   => context.become(leader)
     case JoinedSecondary => context.become(replica)
 
+  def f(op: Operation): Any = {
+    val persist = op match {
+      case Insert(key, value, id) => Persist(key, Option(value), id)
+      case Remove(key, id) => Persist(key, None, id)
+    }
+
+    def update() = {
+      op match
+        case Insert(key, value, _) => kv = kv + (key -> value)
+        case Remove(key, _) => kv = kv - key
+    }
+
+    if (!persistedOperations.contains(op)) {
+      operationsInProgress.get(op) match {
+        case Some((_sender, numOfTry)) if numOfTry < 10 =>
+          operationsInProgress = operationsInProgress.updated(op, (_sender, numOfTry + 1))
+          persistence ! persist
+          context.system.scheduler.scheduleOnce(100.millis, self, op)
+        case Some((_sender, _)) =>
+          operationsInProgress = operationsInProgress.removed(op)
+          _sender ! OperationFailed(op.id)
+        case None =>
+          if (!operationsInProgress.keySet.contains(op)) {
+            operationsInProgress += (op, (sender(), 0))
+            update()
+          }
+          persistence ! persist
+          context.system.scheduler.scheduleOnce(100.millis, self, op)
+      }
+    }
+  }
+
   /* TODO Behavior for  the leader role. */
   //todo add replication
-  val leader: Receive =
+  val leader: Receive = {
     case Get(key, id) =>
       val valueOption = kv.get(key)
       sender() ! GetResult(key, valueOption, id)
-    case Insert(key, valueOption, id) =>
-      kv = kv + (key -> valueOption)
-      sender() ! OperationAck(id)
-    case Remove(key, id) =>
-      kv = kv - key
-      sender() ! OperationAck(id)
+    case insert: Insert =>
+      f(insert)
+    case remove: Remove =>
+      f(remove)
+    case Persisted(_, id) =>
+      val persistedOp = operationsInProgress.find(_._1.id == id)
+      persistedOp match
+        case Some((op, (_sender, _))) =>
+          operationsInProgress -= op
+          persistedOperations += op
+          _sender ! OperationAck(id)
+        case None =>
+  }
 
   /* TODO Behavior for the replica role. */
   //todo update seq
@@ -72,25 +114,22 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
         sender() ! SnapshotAck(key, seq)
       else if seq > counter then
         ()
-      else
-        if (!persistedSnapshots.contains(snapshot)) {
-          val pair = (snapshot, sender())
-          if (!snapshotsInProgress.contains(pair)) {
-            snapshotsInProgress += pair
-            valueOption match
-              case Some(value) =>
-                kv = kv + (key -> value)
-              case None =>
-                kv = kv - key
-          }
-          persistence ! Persist(key, valueOption, seq)
-          context.system.scheduler.scheduleOnce(100.millis) { self ! snapshot }
+      else if !persistedSnapshots.contains(snapshot) then
+        if (!snapshotsInProgress.contains(snapshot)) {
+          snapshotsInProgress += (snapshot, sender())
+          valueOption match
+            case Some(value) =>
+              kv = kv + (key -> value)
+            case None =>
+              kv = kv - key
         }
+        persistence ! Persist(key, valueOption, seq)
+        context.system.scheduler.scheduleOnce(100.millis) { self ! snapshot }
     case Persisted(_, id) =>
-      val snapshotToPersist = snapshotsInProgress.find(_._1.seq == id)
-      snapshotToPersist match
+      val persistedSnapshot = snapshotsInProgress.find(_._1.seq == id)
+      persistedSnapshot match
         case Some((snapshot@Snapshot(key, _, seq), _sender)) =>
-          snapshotsInProgress -= (snapshot, _sender)
+          snapshotsInProgress -= snapshot
           persistedSnapshots += snapshot
           counter = seq + 1
           _sender ! SnapshotAck(key, seq)
