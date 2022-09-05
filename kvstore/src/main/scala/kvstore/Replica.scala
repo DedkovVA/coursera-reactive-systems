@@ -37,7 +37,9 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
   // the current set of replicators
   var replicators = Set.empty[ActorRef]
 
-  var counter: Long = 0L
+  var seqCounter: Long = 0L
+
+  var replicatedCounter: Map[Long, Int] = Map.empty
 
   var snapshotsInProgress: Map[Snapshot, ActorRef] = Map.empty
   var persistedSnapshots: Set[Snapshot] = Set.empty
@@ -51,13 +53,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
     case JoinedPrimary   => context.become(leader)
     case JoinedSecondary => context.become(replica)
 
-  def f(op: Operation): Any = {
+  def modify(op: Operation): Unit = {
     val persist = op match {
       case Insert(key, value, id) => Persist(key, Option(value), id)
       case Remove(key, id) => Persist(key, None, id)
     }
 
-    def update() = {
+    def updateKV(): Unit = {
       op match
         case Insert(key, value, _) => kv = kv + (key -> value)
         case Remove(key, _) => kv = kv - key
@@ -75,9 +77,18 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
         case None =>
           if (!operationsInProgress.keySet.contains(op)) {
             operationsInProgress += (op, (sender(), 0))
-            update()
+            updateKV()
           }
           persistence ! persist
+          val valueOption = op match
+            case Insert(_, value, _) => Option(value)
+            case _ => None
+          replicators.foreach {
+            _ ! Replicate(
+              key = op.key,
+              valueOption = valueOption,
+              id = op.id)
+          }
           context.system.scheduler.scheduleOnce(100.millis, self, op)
       }
     }
@@ -90,17 +101,25 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
       val valueOption = kv.get(key)
       sender() ! GetResult(key, valueOption, id)
     case insert: Insert =>
-      f(insert)
+      modify(insert)
     case remove: Remove =>
-      f(remove)
-    case Persisted(_, id) =>
-      val persistedOp = operationsInProgress.find(_._1.id == id)
-      persistedOp match
-        case Some((op, (_sender, _))) =>
-          operationsInProgress -= op
-          persistedOperations += op
-          _sender ! OperationAck(id)
-        case None =>
+      modify(remove)
+    case p@Persisted(_, id) =>
+      if replicatedCounter.getOrElse(id, 0) == replicators.size then
+        val persistedOp = operationsInProgress.find(_._1.id == id)
+        persistedOp match
+          case Some((op, (_sender, _))) =>
+            operationsInProgress -= op
+            persistedOperations += op
+            _sender ! OperationAck(id)
+          case None =>
+      else
+        context.system.scheduler.scheduleOnce(100.millis, self, p)
+    case Replicas(replicas) =>
+      secondaries = replicas.filter(_ != self).map { r => (r, context.system.actorOf(Replicator.props(r))) }.toMap
+      replicators = secondaries.values.toSet
+    case Replicated(_, id) =>
+      replicatedCounter += (id, replicatedCounter.getOrElse(id, 0) + 1)
   }
 
   /* TODO Behavior for the replica role. */
@@ -110,9 +129,9 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
       val valueOption = kv.get(key)
       sender() ! GetResult(key, valueOption, id)
     case snapshot@Snapshot(key, valueOption, seq) =>
-      if seq < counter then
+      if seq < seqCounter then
         sender() ! SnapshotAck(key, seq)
-      else if seq > counter then
+      else if seq > seqCounter then
         ()
       else if !persistedSnapshots.contains(snapshot) then
         if (!snapshotsInProgress.contains(snapshot)) {
@@ -131,7 +150,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
         case Some((snapshot@Snapshot(key, _, seq), _sender)) =>
           snapshotsInProgress -= snapshot
           persistedSnapshots += snapshot
-          counter = seq + 1
+          seqCounter = seq + 1
           _sender ! SnapshotAck(key, seq)
         case None =>
   }
