@@ -70,8 +70,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
 
     if (!persistedOperations.contains(op)) {
       operationsInProgress.get(op) match {
-        case Some((_sender, numOfTry)) if numOfTry < 10 =>
-          operationsInProgress = operationsInProgress.updated(op, (_sender, numOfTry + 1))
+        case Some((_sender, numOfTry)) if numOfTry < 10 => //todo use 1 sec instead
+          operationsInProgress += (op, (_sender, numOfTry + 1))
           persistence ! persist
           context.system.scheduler.scheduleOnce(100.millis, self, op)
         case Some((_sender, _)) =>
@@ -108,7 +108,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
     case remove: Remove =>
       modify(remove)
     case p@Persisted(_, id) =>
-      if replicatedCounter.getOrElse(id, 0) == replicators.size then
+      if replicatedCounter.getOrElse(id, 0) >= replicators.size then
         val persistedOp = operationsInProgress.find(_._1.id == id)
         persistedOp match
           case Some((op, (_sender, _))) =>
@@ -116,7 +116,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
             persistedOperations += op
             _sender ! OperationAck(id)
           case None =>
+            println(s"couldn't find operation for persisted $p")
       else
+        //todo what if not replicated on some node for some reason? need to send OperationFailed in that case
+        println(s"not replicated yet: $p, $replicatedCounter, ${replicators.size}")
         context.system.scheduler.scheduleOnce(100.millis, self, p)
     case Replicas(replicas) =>
       val _secondaries = replicas.filter(_ != self)
