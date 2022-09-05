@@ -8,8 +8,8 @@ trait Step6_NewSecondarySpec { this: KVStoreSuite =>
 
   test("Step6-case1: Primary must start replication to new replicas") {
     val arbiter = TestProbe()
-        val primary = system.actorOf(Replica.props(arbiter.ref, Persistence.props(flaky = false)), "step6-case1-primary")
-        val user = session(primary)
+    val primary = system.actorOf(Replica.props(arbiter.ref, Persistence.props(flaky = false)), "step6-case1-primary")
+    val user = session(primary)
     val secondary = TestProbe()
 
     arbiter.expectMsg(Join)

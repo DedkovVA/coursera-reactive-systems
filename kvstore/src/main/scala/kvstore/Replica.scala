@@ -1,10 +1,13 @@
 package kvstore
 
-import akka.actor.{ OneForOneStrategy, PoisonPill, Props, SupervisorStrategy, Terminated, ActorRef, Actor, actorRef2Scala }
+import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, SupervisorStrategy, Terminated, actorRef2Scala}
 import kvstore.Arbiter.*
-import akka.pattern.{ ask, pipe }
+import akka.pattern.{ask, pipe}
+
 import scala.concurrent.duration.*
 import akka.util.Timeout
+
+import scala.collection.immutable
 
 object Replica:
   sealed trait Operation:
@@ -116,8 +119,30 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
       else
         context.system.scheduler.scheduleOnce(100.millis, self, p)
     case Replicas(replicas) =>
-      secondaries = replicas.filter(_ != self).map { r => (r, context.system.actorOf(Replicator.props(r))) }.toMap
+      val _secondaries = replicas.filter(_ != self)
+
+      val secondariesToRemove = secondaries.keySet.diff(_secondaries)
+      val secondariesToAdd = _secondaries.diff(secondaries.keySet)
+
+      secondaries.foreach { case (sec, replicator) =>
+        if (secondariesToRemove.contains(sec)) {
+          replicator ! PoisonPill
+          sec ! PoisonPill
+        }
+      }
+
+      val toAdd = secondariesToAdd.map { r => (r, context.system.actorOf(Replicator.props(r))) }.toMap
+      secondaries = secondaries.removedAll(secondariesToRemove) ++ toAdd
       replicators = secondaries.values.toSet
+
+      kv.foreach { case (k, v) =>
+        toAdd.values.foreach {
+          _ ! Replicate(
+            key = k,
+            valueOption = Option(v),
+            id = seqCounter)
+        }
+      }
     case Replicated(_, id) =>
       replicatedCounter += (id, replicatedCounter.getOrElse(id, 0) + 1)
   }
