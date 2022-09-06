@@ -32,7 +32,6 @@ class Replicator(val replica: ActorRef) extends Actor:
   var _seqCounter = 0L
 
 
-  /* TODO Behavior for the Replicator. */
   def receive: Receive = {
     case r@Replicate(key, valueOption, id) =>
       if (!replicatedSet.contains(id)) {
@@ -44,7 +43,7 @@ class Replicator(val replica: ActorRef) extends Actor:
             replica ! Snapshot(key, valueOption, _seqCounter)
             _seqCounter += 1
         }
-        context.system.scheduler.scheduleOnce(100.millis) { self ! r }
+        context.system.scheduler.scheduleOnce(repeatTime, self, r)
       }
     case SnapshotAck(key, seq) =>
       acks.get(seq) match

@@ -4,9 +4,9 @@ import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, Superv
 import kvstore.Arbiter.*
 import akka.pattern.{ask, pipe}
 
-import scala.concurrent.duration.*
 import akka.util.Timeout
 
+import java.util.Date
 import scala.collection.immutable
 
 object Replica:
@@ -47,7 +47,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
   var snapshotsInProgress: Map[Snapshot, ActorRef] = Map.empty
   var persistedSnapshots: Set[Snapshot] = Set.empty
 
-  var operationsInProgress: Map[Operation, (ActorRef, Int)] = Map.empty
+  var operationsInProgress: Map[Operation, (ActorRef, Long)] = Map.empty
   var persistedOperations: Set[Operation] = Set.empty
 
   val persistence = context.system.actorOf(persistenceProps)
@@ -55,6 +55,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
   def receive =
     case JoinedPrimary   => context.become(leader)
     case JoinedSecondary => context.become(replica)
+
+
+  override val supervisorStrategy: OneForOneStrategy = {
+    OneForOneStrategy() {
+      case _: PersistenceException => SupervisorStrategy.Restart
+    }
+  }
 
   def modify(op: Operation): Unit = {
     val persist = op match {
@@ -70,16 +77,17 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
 
     if (!persistedOperations.contains(op)) {
       operationsInProgress.get(op) match {
-        case Some((_sender, numOfTry)) if numOfTry < 10 => //todo use 1 sec instead
-          operationsInProgress += (op, (_sender, numOfTry + 1))
-          persistence ! persist
-          context.system.scheduler.scheduleOnce(100.millis, self, op)
-        case Some((_sender, _)) =>
-          operationsInProgress = operationsInProgress.removed(op)
-          _sender ! OperationFailed(op.id)
+        case Some((_sender, startTime)) =>
+          val currentTime = new Date().getTime
+          if currentTime - startTime < 1000 then
+            persistence ! persist
+            context.system.scheduler.scheduleOnce(repeatTime, self, op)
+          else
+            operationsInProgress = operationsInProgress.removed(op)
+            _sender ! OperationFailed(op.id)
         case None =>
           if (!operationsInProgress.keySet.contains(op)) {
-            operationsInProgress += (op, (sender(), 0))
+            operationsInProgress += (op, (sender(), new Date().getTime))
             updateKV()
           }
           persistence ! persist
@@ -92,13 +100,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
               valueOption = valueOption,
               id = op.id)
           }
-          context.system.scheduler.scheduleOnce(100.millis, self, op)
+          context.system.scheduler.scheduleOnce(repeatTime, self, op)
       }
     }
   }
 
-  /* TODO Behavior for  the leader role. */
-  //todo add replication
   val leader: Receive = {
     case Get(key, id) =>
       val valueOption = kv.get(key)
@@ -116,11 +122,9 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
             persistedOperations += op
             _sender ! OperationAck(id)
           case None =>
-            println(s"couldn't find operation for persisted $p")
       else
-        //todo what if not replicated on some node for some reason? need to send OperationFailed in that case
-        println(s"not replicated yet: $p, $replicatedCounter, ${replicators.size}")
-        context.system.scheduler.scheduleOnce(100.millis, self, p)
+        //todo what if not replicated on some node for some reason? need to introduce timeout for replication, send OperationFailed after timeout
+        context.system.scheduler.scheduleOnce(repeatTime, self, p)
     case Replicas(replicas) =>
       val _secondaries = replicas.filter(_ != self)
 
@@ -150,8 +154,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
       replicatedCounter += (id, replicatedCounter.getOrElse(id, 0) + 1)
   }
 
-  /* TODO Behavior for the replica role. */
-  //todo update seq
   val replica: Receive = {
     case Get(key, id) =>
       val valueOption = kv.get(key)
@@ -171,7 +173,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
               kv = kv - key
         }
         persistence ! Persist(key, valueOption, seq)
-        context.system.scheduler.scheduleOnce(100.millis) { self ! snapshot }
+        context.system.scheduler.scheduleOnce(repeatTime, self, snapshot)
     case Persisted(_, id) =>
       val persistedSnapshot = snapshotsInProgress.find(_._1.seq == id)
       persistedSnapshot match
