@@ -23,14 +23,15 @@ object SelectiveReceive:
   def apply[T: ClassTag](bufferCapacity: Int, initialBehavior: Behavior[T]): Behavior[T] =
     Behaviors.setup { ctx =>
       try {
-        val startedInitialBehavior = Behavior.start(initialBehavior, ctx)
-        val validatedInitialBehaviour = Behavior.validateAsInitial(startedInitialBehavior)
+        val validatedInitialBehaviour = Behavior.validateAsInitial(initialBehavior)
+        val startedInitialBehavior = Behavior.start(validatedInitialBehaviour, ctx)
         val stashedBehaviour: Behavior[T] = Behaviors.withStash(bufferCapacity) { (buffer: StashBuffer[T]) =>
-          intercept(bufferCapacity, buffer, validatedInitialBehaviour)
+          intercept(bufferCapacity, buffer, startedInitialBehavior)
         }
         stashedBehaviour
       } catch {
-        case _: Exception =>
+        case ex: Exception =>
+          ctx.log.warn("Exception in selective receive", ex)
           Behaviors.unhandled
       }
     }

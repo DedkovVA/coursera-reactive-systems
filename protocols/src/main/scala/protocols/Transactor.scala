@@ -31,14 +31,14 @@ object Transactor:
     *                       terminating the session
     */
   def apply[T](value: T, sessionTimeout: FiniteDuration): Behavior[Command[T]] = {
-    SelectiveReceive(30, Behaviors.setup { ctx =>
-      Behaviors.receiveMessage {
-        case begin: Begin[T] =>
-          val privateCommandActorRef: ActorRef[PrivateCommand[T]] = ctx.spawnAnonymous(idle(value, sessionTimeout))
-          privateCommandActorRef.tell(begin)
-          Behaviors.same
-      }
-    })
+    val behavior: Behavior[Command[T]] = Behaviors.receive {
+      case (ctx: ActorContext[Command[T]], begin: Begin[T]) =>
+        val idledBehavior: Behavior[PrivateCommand[T]] = idle(value, sessionTimeout)
+        val idledActorRef: ActorRef[PrivateCommand[T]] = ctx.spawnAnonymous(idledBehavior)
+        begin.replyTo ! ctx.spawnAnonymous(sessionHandler(value, idledActorRef, Set.empty))
+        Behaviors.same
+    }
+    SelectiveReceive(30, behavior)
   }
 
   /**
@@ -61,24 +61,27 @@ object Transactor:
     *   - After a session is started, the next behavior should be [[inSession]],
     *   - Messages other than [[Begin]] should not change the behavior.
     */
-  private def idle[T](value: T, sessionTimeout: FiniteDuration): Behavior[PrivateCommand[T]] = {
-    Behaviors.setup { ctx =>
-      Behaviors.receiveMessage {
-        case Begin(replyTo: ActorRef[ActorRef[Session[T]]]) =>
-          val sessionHandlerBehaviour: Behavior[Session[T]] = sessionHandler(value, ctx.self, Set.empty)
-          val sessionHandlerActorRef: ActorRef[Session[T]] = ctx.spawnAnonymous(sessionHandlerBehaviour)
+  private def idle[T](value: T, sessionTimeout: FiniteDuration): Behavior[PrivateCommand[T]] =
+    Behaviors.receive {
+      case (ctx, Begin(replyTo)) =>
+        println(s"got begin msg")
 
-          val inSessionBehaviour: Behavior[PrivateCommand[T]] = inSession(value, sessionTimeout, sessionHandlerActorRef)
+        val sessionHandlerBehaviour: Behavior[Session[T]] = sessionHandler(value, ctx.self, Set.empty)
+        val sessionHandlerActorRef: ActorRef[Session[T]] = ctx.spawnAnonymous(sessionHandlerBehaviour)
 
-          replyTo.tell(sessionHandlerActorRef)
-          inSessionBehaviour
-        case Committed(session: ActorRef[Session[T]], value: T) =>
-          Behaviors.same
-        case _: PrivateCommand[T] =>
-          Behaviors.same
-      }
+        val inSessionBehaviour: Behavior[PrivateCommand[T]] = inSession(value, sessionTimeout, sessionHandlerActorRef)
+
+        replyTo.tell(sessionHandlerActorRef)
+        inSessionBehaviour
+      case (ctx, Committed(session: ActorRef[Session[T]], value: T)) =>
+        Behaviors.same
+      case (ctx, m: PrivateCommand[T]) =>
+        println(s"private command $m")
+        Behaviors.same
+      case (ctx, m) =>
+        println(s"got unknown message $m")
+        Behaviors.same
     }
-  }
 
   /**
     * @return A behavior that defines how to react to [[PrivateCommand]] messages when the transactor has
