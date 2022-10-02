@@ -9,7 +9,7 @@ object Transactor:
 
   sealed trait PrivateCommand[T] extends Product with Serializable
   final case class Committed[T](session: ActorRef[Session[T]], value: T) extends PrivateCommand[T]
-  final case class RolledBack[T](session: ActorRef[Session[T]]) extends PrivateCommand[T] with Command[T]
+  final case class RolledBack[T](session: ActorRef[Session[T]]) extends PrivateCommand[T]
 
   sealed trait Command[T] extends PrivateCommand[T]
   final case class Begin[T](replyTo: ActorRef[ActorRef[Session[T]]]) extends Command[T]
@@ -31,23 +31,14 @@ object Transactor:
     *                       terminating the session
     */
   def apply[T](value: T, sessionTimeout: FiniteDuration): Behavior[Command[T]] = {
-    val behavior: Behavior[Command[T]] = Behaviors.receive {
+    val behavior: Behavior[Command[T]] = Behaviors.receivePartial {
       case (ctx: ActorContext[Command[T]], begin: Begin[T]) =>
         val idleBehavior: Behavior[PrivateCommand[T]] = idle(value, sessionTimeout)
         val idleActorRef: ActorRef[PrivateCommand[T]] = ctx.spawnAnonymous(idleBehavior)
 
-        val sessionHandlerBehavior: Behavior[Session[T]] = sessionHandler(value, idleActorRef, Set.empty)
-        val sessionHandlerActorRef: ActorRef[Session[T]] = ctx.spawnAnonymous(sessionHandlerBehavior)
+        idleActorRef ! begin
 
-        ctx.scheduleOnce(sessionTimeout, ctx.self, RolledBack(sessionHandlerActorRef))
-
-        ctx.watchWith(sessionHandlerActorRef, RolledBack(sessionHandlerActorRef))
-
-        begin.replyTo ! sessionHandlerActorRef
-        ctx.self ! RolledBack(sessionHandlerActorRef)
         Behaviors.same
-      case (ctx, RolledBack(session)) =>
-        apply(value, sessionTimeout)
     }
     SelectiveReceive(30, behavior)
   }
@@ -73,14 +64,18 @@ object Transactor:
     *   - Messages other than [[Begin]] should not change the behavior.
     */
   private def idle[T](value: T, sessionTimeout: FiniteDuration): Behavior[PrivateCommand[T]] =
-    Behaviors.receive {
+    Behaviors.receivePartial {
       case (ctx, Begin(replyTo)) =>
         println(s"got begin msg")
 
         val sessionHandlerBehaviour: Behavior[Session[T]] = sessionHandler(value, ctx.self, Set.empty)
         val sessionHandlerActorRef: ActorRef[Session[T]] = ctx.spawnAnonymous(sessionHandlerBehaviour)
 
+        //ctx.watchWith(sessionHandlerActorRef, RolledBack(sessionHandlerActorRef))
+
         val inSessionBehaviour: Behavior[PrivateCommand[T]] = inSession(value, sessionTimeout, sessionHandlerActorRef)
+
+        replyTo ! sessionHandlerActorRef
 
         inSessionBehaviour
       case (ctx, Committed(session: ActorRef[Session[T]], value: T)) =>
@@ -106,16 +101,14 @@ object Transactor:
     * @param sessionRef Reference to the child [[Session]] actor
     */
   private def inSession[T](rollbackValue: T, sessionTimeout: FiniteDuration, sessionRef: ActorRef[Session[T]]): Behavior[PrivateCommand[T]] =
-      Behaviors.receive {
+      Behaviors.receivePartial {
         case (ctx, Committed(session: ActorRef[Session[T]], value: T)) =>
-          //ctx.scheduleOnce(sessionTimeout, ctx.self, RolledBack(sessionRef))
-          //inSession(value, sessionTimeout, session)
-          //ctx.stop(session)
-          //ctx.stop(sessionRef)
-          //idle(value, sessionTimeout)
-          Behaviors.same
+          ctx.stop(session)
+          idle(value, sessionTimeout)
         case (ctx, rb@RolledBack(session: ActorRef[Session[T]])) =>
-          //inSession(rollbackValue, sessionTimeout, session)
+          inSession(rollbackValue, sessionTimeout, session)
+        case (ctx, privateCommand: PrivateCommand[T]) =>
+          println(s"Unknown private command")
           Behaviors.same
       }
 
