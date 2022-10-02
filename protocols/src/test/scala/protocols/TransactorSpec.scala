@@ -14,62 +14,62 @@ trait TransactorSpec { self: munit.FunSuite =>
 
   import Transactor.*
 
-//  test("A Transactor must compute") {
-//    val i = TestInbox[Int]()
-//    val done = TestInbox[String]()
-//
-//    var lastSerial = 1L
-//    val serial = Gen.const(0) map { _ =>
-//      lastSerial += 1
-//      lastSerial
-//    }
-//    val extract = Gen.const(Extract[Int, Int](identity, i.ref))
-//    val map = Gen.oneOf(
-//      Gen.zip(arbitrary[Int], serial).map {
-//        case(x, id) => Modify[Int, String](x + _, id, s"add $x", done.ref)
-//      },
-//      Gen.zip(arbitrary[Int], serial).map {
-//        case(x, id) => Modify[Int, String](x * _, id, s"times $x", done.ref)
-//      }
-//    )
-//    val op = Gen.oneOf(extract, map)
-//    val ops = Gen.listOf(op)
-//
-//    var iterationNum = 0
-//    Util.assertPropPassed(forAll(ops) { (list: List[Session[Int]]) =>
-//
-//      iterationNum += 1
-//      println(s"iteration $iterationNum: [$list]")
-//
-//      val start = 1
-//      val testkit = BehaviorTestKit(Transactor(start, 3.seconds))
-//
-//      val sessionInbox: TestInbox[ActorRef[Session[Int]]] = TestInbox[ActorRef[Session[Int]]]()
-//      val sessionInboxRef: ActorRef[ActorRef[Session[Int]]] = sessionInbox.ref
-//      testkit.ref ! Begin(sessionInboxRef)
-//      testkit.runOne()
-//
-//      val receivedMsg: ActorRef[Session[Int]] = sessionInbox.receiveMessage()
-//      val session: BehaviorTestKit[Session[Int]] = testkit.childTestKit(receivedMsg)
-//
-//      val end = list.foldLeft(start) { (current, op) =>
-//        session.ref ! op
-//        session.runOne()
-//        op match {
-//          case Extract(_, _) =>
-//            assertEquals(i.receiveAll(), Seq(current))
-//            current
-//          case Modify(f, _, reply, _) =>
-//            assertEquals[Any, Any](done.receiveAll(), Seq(reply))
-//            f(current)
-//          case _ => current
-//        }
-//      }
-//      session.ref ! Extract[Int, Int](identity, i.ref)
-//      session.runOne()
-//      i.receiveAll() == Seq(end)
-//    })
-//  }
+  test("A Transactor must compute") {
+    val i = TestInbox[Int]()
+    val done = TestInbox[String]()
+
+    var lastSerial = 1L
+    val serial = Gen.const(0) map { _ =>
+      lastSerial += 1
+      lastSerial
+    }
+    val extract = Gen.const(Extract[Int, Int](identity, i.ref))
+    val map = Gen.oneOf(
+      Gen.zip(arbitrary[Int], serial).map {
+        case(x, id) => Modify[Int, String](x + _, id, s"add $x", done.ref)
+      },
+      Gen.zip(arbitrary[Int], serial).map {
+        case(x, id) => Modify[Int, String](x * _, id, s"times $x", done.ref)
+      }
+    )
+    val op = Gen.oneOf(extract, map)
+    val ops = Gen.listOf(op)
+
+    var iterationNum = 0
+    Util.assertPropPassed(forAll(ops) { (list: List[Session[Int]]) =>
+
+      iterationNum += 1
+      println(s"iteration $iterationNum: [$list]")
+
+      val start = 1
+      val testkit = BehaviorTestKit(Transactor(start, 3.seconds))
+
+      val sessionInbox: TestInbox[ActorRef[Session[Int]]] = TestInbox[ActorRef[Session[Int]]]()
+      val sessionInboxRef: ActorRef[ActorRef[Session[Int]]] = sessionInbox.ref
+      testkit.ref ! Begin(sessionInboxRef)
+      testkit.runOne()
+
+      val receivedMsg: ActorRef[Session[Int]] = sessionInbox.receiveMessage()
+      val session: BehaviorTestKit[Session[Int]] = testkit.childTestKit(receivedMsg)
+
+      val end = list.foldLeft(start) { (current, op) =>
+        session.ref ! op
+        session.runOne()
+        op match {
+          case Extract(_, _) =>
+            assertEquals(i.receiveAll(), Seq(current))
+            current
+          case Modify(f, _, reply, _) =>
+            assertEquals[Any, Any](done.receiveAll(), Seq(reply))
+            f(current)
+          case _ => current
+        }
+      }
+      session.ref ! Extract[Int, Int](identity, i.ref)
+      session.runOne()
+      i.receiveAll() == Seq(end)
+    })
+  }
 
   test("A Transactor must commit") {
     val done = TestInbox[String]()
