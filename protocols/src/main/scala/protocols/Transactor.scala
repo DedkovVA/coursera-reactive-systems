@@ -9,7 +9,7 @@ object Transactor:
 
   sealed trait PrivateCommand[T] extends Product with Serializable
   final case class Committed[T](session: ActorRef[Session[T]], value: T) extends PrivateCommand[T]
-  final case class RolledBack[T](session: ActorRef[Session[T]]) extends PrivateCommand[T]
+  final case class RolledBack[T](session: ActorRef[Session[T]]) extends PrivateCommand[T] with Command[T]
 
   sealed trait Command[T] extends PrivateCommand[T]
   final case class Begin[T](replyTo: ActorRef[ActorRef[Session[T]]]) extends Command[T]
@@ -33,10 +33,21 @@ object Transactor:
   def apply[T](value: T, sessionTimeout: FiniteDuration): Behavior[Command[T]] = {
     val behavior: Behavior[Command[T]] = Behaviors.receive {
       case (ctx: ActorContext[Command[T]], begin: Begin[T]) =>
-        val idledBehavior: Behavior[PrivateCommand[T]] = idle(value, sessionTimeout)
-        val idledActorRef: ActorRef[PrivateCommand[T]] = ctx.spawnAnonymous(idledBehavior)
-        begin.replyTo ! ctx.spawnAnonymous(sessionHandler(value, idledActorRef, Set.empty))
+        val idleBehavior: Behavior[PrivateCommand[T]] = idle(value, sessionTimeout)
+        val idleActorRef: ActorRef[PrivateCommand[T]] = ctx.spawnAnonymous(idleBehavior)
+
+        val sessionHandlerBehavior: Behavior[Session[T]] = sessionHandler(value, idleActorRef, Set.empty)
+        val sessionHandlerActorRef: ActorRef[Session[T]] = ctx.spawnAnonymous(sessionHandlerBehavior)
+
+        ctx.scheduleOnce(sessionTimeout, ctx.self, RolledBack(sessionHandlerActorRef))
+
+        ctx.watchWith(sessionHandlerActorRef, RolledBack(sessionHandlerActorRef))
+
+        begin.replyTo ! sessionHandlerActorRef
+        ctx.self ! RolledBack(sessionHandlerActorRef)
         Behaviors.same
+      case (ctx, RolledBack(session)) =>
+        apply(value, sessionTimeout)
     }
     SelectiveReceive(30, behavior)
   }
@@ -71,9 +82,10 @@ object Transactor:
 
         val inSessionBehaviour: Behavior[PrivateCommand[T]] = inSession(value, sessionTimeout, sessionHandlerActorRef)
 
-        replyTo.tell(sessionHandlerActorRef)
         inSessionBehaviour
       case (ctx, Committed(session: ActorRef[Session[T]], value: T)) =>
+        Behaviors.same
+      case (ctx, rb@RolledBack(session)) =>
         Behaviors.same
       case (ctx, m: PrivateCommand[T]) =>
         println(s"private command $m")
@@ -94,17 +106,18 @@ object Transactor:
     * @param sessionRef Reference to the child [[Session]] actor
     */
   private def inSession[T](rollbackValue: T, sessionTimeout: FiniteDuration, sessionRef: ActorRef[Session[T]]): Behavior[PrivateCommand[T]] =
-    Behaviors.setup { ctx =>
-      Behaviors.receiveMessage {
-        case Committed(session: ActorRef[Session[T]], value: T) =>
-          inSession(value, sessionTimeout, session)
-        case RolledBack(session: ActorRef[Session[T]]) =>
-          inSession(rollbackValue, sessionTimeout, session)
-        case m =>
-          println(s"Unknown msg-2 $m")
+      Behaviors.receive {
+        case (ctx, Committed(session: ActorRef[Session[T]], value: T)) =>
+          //ctx.scheduleOnce(sessionTimeout, ctx.self, RolledBack(sessionRef))
+          //inSession(value, sessionTimeout, session)
+          //ctx.stop(session)
+          //ctx.stop(sessionRef)
+          //idle(value, sessionTimeout)
+          Behaviors.same
+        case (ctx, rb@RolledBack(session: ActorRef[Session[T]])) =>
+          //inSession(rollbackValue, sessionTimeout, session)
           Behaviors.same
       }
-    }
 
   /**
     * @return A behavior handling [[Session]] messages. See in the instructions
@@ -115,26 +128,28 @@ object Transactor:
     * @param done Set of already applied [[Modify]] messages
     */
   private def sessionHandler[T](currentValue: T, commit: ActorRef[Committed[T]], done: Set[Long]): Behavior[Session[T]] = {
-    Behaviors.setup { ctx =>
-      Behaviors.receiveMessage {
-        case Modify(f, id, reply, replyTo) =>
+      Behaviors.receive {
+        case (ctx, Modify(f, id, reply, replyTo)) =>
+          replyTo ! reply
           if (done.contains(id)) {
-            replyTo ! reply
             Behaviors.same
           } else {
             val modifiedValue = f(currentValue)
-            commit ! Committed(ctx.self, modifiedValue)
-            replyTo ! reply
             sessionHandler(modifiedValue, commit, done + id)
           }
-        case Extract(f, replyTo) =>
+        case (_, Extract(f, replyTo)) =>
           val projectionedValue = f(currentValue)
           replyTo ! projectionedValue
           Behaviors.same
-        case m =>
+        case (ctx, Commit(reply, replyTo)) =>
+          replyTo ! reply
+          commit ! Committed(ctx.self, currentValue)
+          Behaviors.stopped
+        case (ctx, _: Rollback[T]) =>
+          Behaviors.stopped
+        case (_, m) =>
           println(s"Unknown msg $m")
           Behaviors.same
       }
-    }
   }
 
